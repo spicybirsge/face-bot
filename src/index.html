@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Tech news from the nerd stuff channel on Face’s attic, archived by a Discord bot and available through a public JSON API and RSS feed.">
   <link rel="alternate" type="application/rss+xml" title="Tech News" href="/feed.xml">
-  <title>Tech News from Face’s attic api</title>
+  <title>Tech news from face attic's discord server</title>
   <style>
     :root { color-scheme: light dark; font: 100%/1.6 system-ui, sans-serif; }
     body { margin: 0; background: Canvas; color: CanvasText; }
@@ -40,10 +40,12 @@
         <dd>Pass the previous response’s <code>nextCursor</code> with the same category to request older stories. A null cursor means you reached the end.</dd>
       </dl>
       <p>Each item has an ID, title, publication time, optional summary and category, article links, and attachments if available.</p>
+      <p><code>raw_content</code> contains the original Discord Markdown with the leading role ping removed. It is <code>null</code> for older entries awaiting a refresh.</p>
     </section>
     <section aria-labelledby="feed">
       <h2 id="feed">RSS subscription</h2>
       <p>Add <a href="/feed.xml"><code>/feed.xml</code></a> to your reader for the latest 50 stories.</p>
+      <p>RSS consumers can read the same Markdown from <code>face:raw_content</code> when available.</p>
       <p>JSON and RSS both accept <code>If-None-Match</code> with the last response’s <code>ETag</code>. An unchanged response returns <code>304</code>.</p>
     </section>
   </main>

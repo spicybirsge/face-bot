@@ -5,6 +5,7 @@ import { categories, type Category, type NewsPost } from './news.ts';
 
 const docs = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const pageSize = 50;
+const rssNamespace = 'https://github.com/spicybirsge/face-bot/ns/rss';
 const entities: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
 const escapeXml = (text: string) => text
   .replace(/[^\u0009\u000a\u000d\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu, '')
@@ -32,13 +33,19 @@ function decodeCursor(encoded: unknown): PostCursor | null {
 function rss(posts: NewsPost[], baseUrl: string) {
   const root = escapeXml(baseUrl);
   const lastChanged = posts.map(post => post.updatedAt ?? post.publishedAt).sort().at(-1);
-  const items = posts.map(post => `    <item>
-      <title>${escapeXml(post.title)}</title>
-      <guid isPermaLink="false">${post.id}</guid>
-      <pubDate>${new Date(post.publishedAt).toUTCString()}</pubDate>
-${post.links.length ? `      <link>${escapeXml(post.links[0])}</link>\n` : ''}${post.category ? `      <category>${post.category}</category>\n` : ''}${post.summary ? `      <description>${escapeXml(escapeXml(post.summary))}</description>\n` : ''}    </item>`);
+  const items = posts.map(post => [
+    '    <item>',
+    `      <title>${escapeXml(post.title)}</title>`,
+    `      <guid isPermaLink="false">${post.id}</guid>`,
+    `      <pubDate>${new Date(post.publishedAt).toUTCString()}</pubDate>`,
+    post.links.length && `      <link>${escapeXml(post.links[0])}</link>`,
+    post.category && `      <category>${post.category}</category>`,
+    post.summary && `      <description>${escapeXml(escapeXml(post.summary))}</description>`,
+    post.raw_content !== null && `      <face:raw_content>${escapeXml(post.raw_content).replace(/\r/g, '&#13;')}</face:raw_content>`,
+    '    </item>',
+  ].filter(Boolean).join('\n'));
   return `<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:face="${rssNamespace}">
   <channel>
     <title>Tech News</title>
     <link>${root}/</link>

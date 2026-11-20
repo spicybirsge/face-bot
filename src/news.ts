@@ -12,6 +12,7 @@ export interface NewsPost {
   id: string;
   title: string;
   summary: string | null;
+  raw_content: string | null;
   category: Category | null;
   publishedAt: string;
   updatedAt: string | null;
@@ -33,8 +34,8 @@ export function isSourceDeleted(message: Pick<MessageSource, 'flags'>) {
 
 function readLabels(content: string, config: NewsSource) {
   const labels = new Set<Category | null>();
-  let rest = content.trimStart();
-  const prefix = /^(?:<@&(\d+)>|@(Nerds(?:[ \t]+AI)?)(?![\p{L}\p{N}_]))\s*/iu;
+  let rest = content;
+  const prefix = /^\s*(?:<@&(\d+)>|@(Nerds(?:[ \t]+AI)?)(?![\p{L}\p{N}_]))[^\S\r\n]*(?:\r\n?|\n)?/iu;
   for (let match; (match = prefix.exec(rest)); rest = rest.slice(match[0].length)) {
     const [, roleId, text] = match;
     if (text) labels.add(/ai$/i.test(text) ? 'nerds-ai' : 'nerds');
@@ -95,6 +96,7 @@ export function normalizePost(message: NewsMessage, config: NewsSource): NewsPos
     id,
     title: title || (primaryLink ? new URL(primaryLink).hostname : 'News update'),
     summary,
+    raw_content: rest,
     category,
     publishedAt: new Date(message.timestamp).toISOString(),
     updatedAt: message.edited_timestamp ? new Date(message.edited_timestamp).toISOString() : null,

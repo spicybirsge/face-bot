@@ -20,6 +20,7 @@ The service imports the available destination history when first started, resume
 
 - Run `pnpm sync backfill` to import or resume the history before starting the service. The command prints counts for messages scanned and stories archived.
 - Run `pnpm sync resync` to compare the archive with the full current destination history and remove archived posts that were deleted while the bot was offline. A failed scan can be rerun from the top. Only a completed resync can remove posts based on absence.
+- After upgrading an existing archive, run `pnpm sync resync` to populate `raw_content` for messages still available in Discord.
 - Stop the service before running either write command. The archive allows one writer process at a time. `pnpm sync inspect` can run alongside the service. Use a new `DATABASE_PATH` when changing to a different source or destination.
 
 ## API
@@ -30,6 +31,8 @@ The service imports the available destination history when first started, resume
 | `GET /v1/news` | JSON with `items` and `nextCursor` |
 | `GET /feed.xml` | RSS 2.0 with up to 50 items |
 
-Use `limit` from 1 to 100 (default 50) and optional `category=nerds` or `category=nerds-ai`. Pass `nextCursor` back as `cursor` with the same category to get the next page. Each item includes `id`, `title`, `summary`, `category`, `publishedAt`, `updatedAt`, `links`, and `attachments`. Both data routes support `ETag` and `If-None-Match`.
+Use `limit` from 1 to 100 (default 50) and optional `category=nerds` or `category=nerds-ai`. Pass `nextCursor` back as `cursor` with the same category to get the next page. Each item includes `id`, `title`, `summary`, `raw_content`, `category`, `publishedAt`, `updatedAt`, `links`, and `attachments`. Both data routes support `ETag` and `If-None-Match`.
+
+`raw_content` preserves the original Discord Markdown, including link labels and destinations, with leading role pings removed. It is an empty string if a message has no text and `null` for entries archived before this field was introduced. The RSS feed exposes available Markdown as element text in `face:raw_content` using the namespace `https://github.com/spicybirsge/face-bot/ns/rss`.
 
 The service runs directly from TypeScript on Node.js 24. Run `pnpm typecheck` for strict type checking and `pnpm test` for the offline sync, parsing, and API checks.

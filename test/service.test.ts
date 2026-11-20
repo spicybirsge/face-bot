@@ -3,6 +3,7 @@ import { EventEmitter, once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { setImmediate as tick } from 'node:timers/promises';
 import {
@@ -31,8 +32,8 @@ function message(number: number, fields: Partial<NewsMessage> = {}): NewsMessage
   };
 }
 
-function fixtures(t: TestContext) {
-  const archive = openArchive(':memory:', 'test');
+function fixtures(t: TestContext, path = ':memory:') {
+  const archive = openArchive(path, 'test');
   t.after(() => archive.close());
   const messages = new Map<string, NewsMessage>();
   const calls: (string | null)[] = [];
@@ -59,10 +60,14 @@ test('normalizes followed posts, prefers source links, and leaves ambiguous labe
   assert.equal(posted.category, 'nerds-ai');
   assert.equal(posted.title, '🔑 Story 1');
   assert.equal(posted.summary, 'A useful update.');
+  assert.equal(posted.raw_content, '🔑 **[Story 1](https://example.com/feature_(technology))**\n\n> A useful update.\nSources: [Original](https://example.com/source?a=1&b=2)');
   assert.deepEqual(posted.links, ['https://example.com/source?a=1&b=2', 'https://example.com/feature_(technology)']);
   assert.equal(normalizePost(message(2, { content: `<@&${config.nerdsRoleId}> Headline` }), config)?.category, 'nerds');
+  assert.equal(normalizePost(message(2, { content: `<@&${config.nerdsRoleId}>\r\n    code  ` }), config)?.raw_content, '    code  ');
   assert.equal(normalizePost(message(3, { content: '@Nerds @Nerds AI News' }), config)?.category, null);
   assert.equal(normalizePost(message(4, { content: 'Headline about @Nerds' }), config)?.category, null);
+  assert.equal(normalizePost(message(4, { content: '    Headline about @Nerds' }), config)?.raw_content, '    Headline about @Nerds');
+  assert.equal(normalizePost(message(4, { content: '', embeds: [{ title: 'Embed headline' }] }), config)?.raw_content, '');
   assert.equal(normalizePost(message(4, { content: '[title](javascript:alert(1))' }), config)?.links.length, 0);
   assert.equal(normalizePost(message(5, { message_reference: { channel_id: '9' }, webhook_id: config.followerWebhookId }), config), null);
   assert.equal(normalizePost(message(6, { flags: 0, message_reference: undefined, webhook_id: '9' }), config), null);
@@ -133,10 +138,34 @@ test('enforces a single archive writer and releases it at shutdown', () => {
   }
 });
 
+test('reads older archive rows and fills in Markdown on resync without changing article IDs', async t => {
+  const folder = mkdtempSync(join(tmpdir(), 'face-bot-'));
+  const path = join(folder, 'news.sqlite');
+  const { archive, messages, sync } = fixtures(t, path);
+  t.after(() => rmSync(folder, { recursive: true }));
+
+  const original = message(1, { content: '@Nerds **Original headline**' });
+  messages.set(original.id, original);
+  await sync.catchUp();
+  const [post] = archive.list({ limit: 1 });
+
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("UPDATE posts SET article = json_remove(article, '$.raw_content')");
+  } finally {
+    db.close();
+  }
+  assert.deepEqual(archive.list({ limit: 1 }), [{ ...post, raw_content: null }]);
+
+  await sync.fullScan(true);
+  assert.deepEqual(archive.list({ limit: 1 }), [{ ...post, raw_content: '**Original headline**' }]);
+});
+
 test('serves docs, paginated JSON and RSS with ETags and finished request counters', async t => {
   const { archive, sync } = fixtures(t);
   sync.record(message(1, { content: 'Story without label' }));
-  sync.record(message(2, { content: '@Nerds Story & details\nA literal <b>tag</b>.\nhttps://example.com/?a=1&b=2' }));
+  const markdown = 'Story & details\r\nA literal <b>tag</b>.\nhttps://example.com/?a=1&b=2';
+  sync.record(message(2, { content: `@Nerds ${markdown}` }));
   sync.record(message(3));
   const requestStats = createRequestStats();
   const app = createApp({ archive, publicBaseUrl: 'https://news.example.org', requestStats });
@@ -154,7 +183,9 @@ test('serves docs, paginated JSON and RSS with ETags and finished request counte
 
   const docs = await get('/');
   assert.match(docs.headers.get('content-type') ?? '', /text\/html/);
-  assert.match(await docs.text(), /JSON archive/);
+  const html = await docs.text();
+  assert.match(html, /<title>Tech news from face attic's discord server<\/title>/);
+  assert.match(html, /JSON archive/);
 
   const response = await get('/v1/news?limit=1');
   const etag = response.headers.get('etag');
@@ -163,6 +194,7 @@ test('serves docs, paginated JSON and RSS with ETags and finished request counte
   assert.equal(page.items[0].title, '🔑 Story 3');
   const second = await readPage(await get(`/v1/news?cursor=${page.nextCursor}`));
   assert.deepEqual(second.items.map(post => post.title), ['Story & details', 'Story without label']);
+  assert.equal(second.items[0].raw_content, markdown);
   assert.equal(second.nextCursor, null);
   assert.equal((await readPage(await get('/v1/news?category=nerds'))).items.length, 1);
   for (const query of ['?limit=101', '?limit=1&limit=2', '?cursor=x', '?category=other']) {
@@ -186,12 +218,15 @@ test('serves docs, paginated JSON and RSS with ETags and finished request counte
   assert.match(text, /<title>Story &amp; details<\/title>/);
   assert.match(text, /<link>https:\/\/example.com\/\?a=1&amp;b=2<\/link>/);
   assert.match(text, /&amp;lt;b&amp;gt;tag&amp;lt;\/b&amp;gt;/);
+  assert.ok(text.includes('xmlns:face="https://github.com/spicybirsge/face-bot/ns/rss"'));
+  assert.ok(text.includes('<face:raw_content>Story &amp; details&#13;\nA literal &lt;b&gt;tag&lt;/b&gt;.\nhttps://example.com/?a=1&amp;b=2</face:raw_content>'));
   assert.ok(text.includes(`<guid isPermaLink="false">${page.items[0].id}</guid>`));
   assert.equal((await get('/feed.xml', conditional(feed.headers.get('etag')))).status, 304);
   sync.record(message(3, { content: 'Updated headline', edited_timestamp: '2026-11-09T00:00:00Z' }));
   const edited = await readPage(await get('/v1/news?limit=1', conditional(etag)));
   assert.equal(edited.items[0].id, page.items[0].id);
   assert.equal(edited.items[0].title, 'Updated headline');
+  assert.equal(edited.items[0].raw_content, 'Updated headline');
   sync.remove([articleId(3)]);
   assert.ok(!(await (await get('/feed.xml')).text()).includes(page.items[0].id));
   await tick();
