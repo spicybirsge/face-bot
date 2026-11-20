@@ -9,12 +9,38 @@ export interface DiscordHistory {
 }
 
 const pageSize = 100;
+const hour = 60 * 60_000;
+const fullSyncInterval = 12 * hour;
+const attachmentRefreshLead = hour;
+const attachmentRetryInterval = 5 * 60_000;
+const minAttachmentRetryInterval = 30_000;
 
 function isNewer(id: string, checkpoint: string) {
   return BigInt(id) > BigInt(checkpoint);
 }
 
 export function createSync({ archive, discord, config }: { archive: Archive; discord: DiscordHistory; config: NewsSource }) {
+  function nextFullSyncAt() {
+    const lastFullSync = archive.getState('lastFullSyncAt');
+    if (!lastFullSync) return 0;
+    const lastFullSyncAt = Date.parse(lastFullSync);
+    let earliestExpiry = Infinity;
+    for (const value of archive.attachmentUrls()) {
+      const url = URL.parse(value);
+      if (!url || !['cdn.discordapp.com', 'media.discordapp.net'].includes(url.hostname)
+        || !url.pathname.startsWith('/attachments/')) continue;
+      const expiry = url.searchParams.get('ex');
+      if (expiry && /^[\da-f]{1,10}$/i.test(expiry)) {
+        earliestExpiry = Math.min(earliestExpiry, Number.parseInt(expiry, 16) * 1000);
+      }
+    }
+    // A fetched link can still be close to expiry. Shorten the retry delay to fit its remaining lifetime.
+    const retryDelay = Math.max(minAttachmentRetryInterval,
+      Math.min(attachmentRetryInterval, Math.floor((earliestExpiry - lastFullSyncAt) / 2)));
+    const attachmentRefreshAt = Math.max(earliestExpiry - attachmentRefreshLead, lastFullSyncAt + retryDelay);
+    return Math.min(lastFullSyncAt + fullSyncInterval, attachmentRefreshAt);
+  }
+
   function writeMessages(messages: NewsMessage[], scanId?: string | null) {
     for (const message of messages) {
       if (isFollowedPost(message, config)) archive.writePost(message.id, normalizePost(message, config), scanId);
@@ -35,15 +61,18 @@ export function createSync({ archive, discord, config }: { archive: Archive; dis
       if (!progress.before && page.length) progress.newest = page[0].id;
       if (page.length) progress.before = page[page.length - 1].id;
       progress.scanned += page.length;
-      progress.complete = page.length < pageSize;
+      // The requested limit is a maximum. Confirm the end before pruning unseen posts.
+      progress.complete = page.length === 0;
 
       if (progress.complete) await discord.verifyChannel();
       archive.transaction(() => {
         writeMessages(page, scanId);
         if (!resync || progress.complete) archive.setState('backfill', progress);
         if (progress.complete) {
+          const completedAt = new Date().toISOString();
           archive.setState('checkpoint', progress.newest);
-          archive.setState('lastSyncAt', new Date().toISOString());
+          archive.setState('lastSyncAt', completedAt);
+          archive.setState('lastFullSyncAt', completedAt);
           if (scanId) archive.prune(scanId);
         }
       });
@@ -64,7 +93,7 @@ export function createSync({ archive, discord, config }: { archive: Archive; dis
       const newMessages = page.filter(message => isNewer(message.id, checkpoint));
       if (!before && newMessages.length) newest = newMessages[0].id;
       scanned += newMessages.length;
-      const complete = newMessages.length < pageSize;
+      const complete = page.length === 0 || newMessages.length < page.length;
       if (complete && !page.length) await discord.verifyChannel();
       archive.transaction(() => {
         writeMessages(newMessages);
@@ -88,5 +117,5 @@ export function createSync({ archive, discord, config }: { archive: Archive; dis
     });
   }
 
-  return { fullScan, catchUp, record, remove };
+  return { fullScan, catchUp, nextFullSyncAt, record, remove };
 }
