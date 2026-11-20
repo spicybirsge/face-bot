@@ -10,6 +10,8 @@ The bot archives a followed Discord announcement channel and serves the saved st
 4. Set `PUBLIC_BASE_URL` to the origin used by clients. Set `PORT`, `HOST`, and `DATABASE_PATH` as needed. For a hosted service, put the SQLite file on persistent storage and serve HTTPS at the public origin.
 5. Run `pnpm sync inspect` to check the title and category detected on recent posts, then run `pnpm start`. Browse the docs at `http://localhost:3000/` with the default settings. The bot registers `/stats` in the destination server.
 
+For local development, run `pnpm dev` with the same `.env` setup. The bot and API restart automatically when you edit the TypeScript source.
+
 Discord can strip role mentions when following a channel. The parser recognizes a leading `@Nerds` or `@Nerds AI` label that survives in the same message. If role mention tokens survive, `DISCORD_NERDS_ROLE_ID` and `DISCORD_NERDS_AI_ROLE_ID` let you map those IDs. Unlabeled or ambiguous posts show a `null` category. Attachment links are Discord URLs and can expire.
 
 ## History and recovery
