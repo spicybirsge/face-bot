@@ -64,7 +64,16 @@ test('normalizes followed posts, prefers source links, and leaves ambiguous labe
   assert.deepEqual(posted.links, ['https://example.com/source?a=1&b=2', 'https://example.com/feature_(technology)']);
   assert.equal(normalizePost(message(2, { content: `<@&${config.nerdsRoleId}> Headline` }), config)?.category, 'nerds');
   assert.equal(normalizePost(message(2, { content: `<@&${config.nerdsRoleId}>\r\n    code  ` }), config)?.raw_content, '    code  ');
-  assert.equal(normalizePost(message(3, { content: '@Nerds @Nerds AI News' }), config)?.category, null);
+  const code = '\n    @Nerds AI is literal code\n    next line';
+  const indented = normalizePost(message(2, { content: `@Nerds\n${code}` }), config);
+  assert.equal(indented?.raw_content, code);
+  assert.equal(indented?.category, 'nerds');
+  const repeated = normalizePost(message(3, { content: '@Nerds @Nerds AI News' }), config);
+  assert.equal(repeated?.category, null);
+  assert.equal(repeated?.raw_content, 'News');
+  const headline = normalizePost(message(3, { content: '@Nerds AI-powered tools' }), config);
+  assert.equal(headline?.category, 'nerds');
+  assert.equal(headline?.raw_content, 'AI-powered tools');
   assert.equal(normalizePost(message(4, { content: 'Headline about @Nerds' }), config)?.category, null);
   assert.equal(normalizePost(message(4, { content: '    Headline about @Nerds' }), config)?.raw_content, '    Headline about @Nerds');
   assert.equal(normalizePost(message(4, { content: '', embeds: [{ title: 'Embed headline' }] }), config)?.raw_content, '');
@@ -164,7 +173,7 @@ test('reads older archive rows and fills in Markdown on resync without changing 
 test('serves docs, paginated JSON and RSS with ETags and finished request counters', async t => {
   const { archive, sync } = fixtures(t);
   sync.record(message(1, { content: 'Story without label' }));
-  const markdown = 'Story & details\r\nA literal <b>tag</b>.\nhttps://example.com/?a=1&b=2';
+  const markdown = 'Story & details\r\nA literal <b>tag</b>\f.\nhttps://example.com/?a=1&b=2';
   sync.record(message(2, { content: `@Nerds ${markdown}` }));
   sync.record(message(3));
   const requestStats = createRequestStats();

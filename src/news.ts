@@ -35,7 +35,8 @@ export function isSourceDeleted(message: Pick<MessageSource, 'flags'>) {
 function readLabels(content: string, config: NewsSource) {
   const labels = new Set<Category | null>();
   let rest = content;
-  const prefix = /^\s*(?:<@&(\d+)>|@(Nerds(?:[ \t]+AI)?)(?![\p{L}\p{N}_]))[^\S\r\n]*(?:\r\n?|\n)?/iu;
+  // Skip blank lines, but leave indented Markdown code intact.
+  const prefix = /^(?:[ \t]*(?:\r\n?|\n))* {0,3}(?:<@&(\d+)>|@(Nerds(?:[ \t]+AI(?![\p{L}\p{N}_\p{Pd}]))?)(?![\p{L}\p{N}_]))[^\S\r\n]*(?:\r\n?|\n)?/iu;
   for (let match; (match = prefix.exec(rest)); rest = rest.slice(match[0].length)) {
     const [, roleId, text] = match;
     if (text) labels.add(/ai$/i.test(text) ? 'nerds-ai' : 'nerds');

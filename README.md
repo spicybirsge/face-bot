@@ -33,6 +33,6 @@ The service imports the available destination history when first started, resume
 
 Use `limit` from 1 to 100 (default 50) and optional `category=nerds` or `category=nerds-ai`. Pass `nextCursor` back as `cursor` with the same category to get the next page. Each item includes `id`, `title`, `summary`, `raw_content`, `category`, `publishedAt`, `updatedAt`, `links`, and `attachments`. Both data routes support `ETag` and `If-None-Match`.
 
-`raw_content` preserves the original Discord Markdown, including link labels and destinations, with leading role pings removed. It is an empty string if a message has no text and `null` for entries archived before this field was introduced. The RSS feed exposes available Markdown as element text in `face:raw_content` using the namespace `https://github.com/spicybirsge/face-bot/ns/rss`.
+`raw_content` preserves the original Discord Markdown, including link labels and destinations, with leading role pings removed. It is an empty string if a message has no text and `null` for entries archived before this field was introduced. The RSS feed exposes available Markdown as element text in `face:raw_content` using the namespace `https://github.com/spicybirsge/face-bot/ns/rss`. RSS omits characters that XML 1.0 cannot represent, such as form feeds.
 
 The service runs directly from TypeScript on Node.js 24. Run `pnpm typecheck` for strict type checking and `pnpm test` for the offline sync, parsing, and API checks.

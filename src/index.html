@@ -45,7 +45,7 @@
     <section aria-labelledby="feed">
       <h2 id="feed">RSS subscription</h2>
       <p>Add <a href="/feed.xml"><code>/feed.xml</code></a> to your reader for the latest 50 stories.</p>
-      <p>RSS consumers can read the same Markdown from <code>face:raw_content</code> when available.</p>
+      <p>RSS consumers can read the Markdown from <code>face:raw_content</code> when available. RSS omits characters that XML 1.0 cannot represent.</p>
       <p>JSON and RSS both accept <code>If-None-Match</code> with the last response’s <code>ETag</code>. An unchanged response returns <code>304</code>.</p>
     </section>
   </main>
