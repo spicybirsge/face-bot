@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { setImmediate as tick } from 'node:timers/promises';
 import {
-  Events, GatewayDispatchEvents as Dispatch, MessageFlags,
+  ApplicationCommandType, EmbedBuilder, Events, GatewayDispatchEvents as Dispatch, MessageFlags,
   type ApplicationCommandData, type Client, type InteractionReplyOptions,
 } from 'discord.js';
 import { createApp, createRequestStats } from '../src/api.ts';
@@ -200,13 +200,32 @@ test('serves docs, paginated JSON and RSS with ETags and finished request counte
   assert.equal(requestStats.snapshot().errors, 4);
 });
 
-test('queues gateway events behind a catch-up and serves the stats command', async t => {
+test('queues gateway events behind a catch-up and replaces stale slash commands on startup', async t => {
   const { archive, messages, discord } = fixtures(t);
+  const deletedCommands: string[] = [];
+  const registrations: string[] = [];
+  const guildId = 'guild';
+  const command = (name: string, scope: string | null, type = ApplicationCommandType.ChatInput) => ({
+    name, guildId: scope, type,
+    async delete() { deletedCommands.push(`${scope ?? 'global'}:${name}`); },
+  });
+  const globalCommands = [command('old-global', null), command('stats', null), command('Inspect', null, ApplicationCommandType.User)];
+  const guildCommands = [command('old-local', guildId), command('stats', guildId), command('Quote', guildId, ApplicationCommandType.Message)];
   const client = Object.assign(new EventEmitter(), {
     login: async () => {}, destroy: async () => {}, uptime: 1000,
-    ws: { ping: 8 }, guilds: { cache: new Map([['guild', {}]]) },
-    channels: { fetch: async () => ({ guildId: 'guild' }) },
-    application: { commands: { create: async (command: ApplicationCommandData) => assert.equal(command.name, 'stats') } },
+    ws: { ping: 8 }, guilds: { cache: new Map([[guildId, {}]]) },
+    channels: { fetch: async () => ({ guildId }) },
+    application: { commands: {
+      async create(data: ApplicationCommandData, scope: string) {
+        assert.equal(data.type, ApplicationCommandType.ChatInput);
+        registrations.push(`${scope}:${data.name}`);
+      },
+      async fetch(options?: { guildId: string }) {
+        if (!options) return globalCommands;
+        assert.equal(options.guildId, guildId);
+        return guildCommands;
+      },
+    } },
   });
   const connection = { ...discord, client: client as unknown as Client };
   const stop = connectBot({ config, archive, discord: connection, requestStats: createRequestStats() });
@@ -220,6 +239,10 @@ test('queues gateway events behind a catch-up and serves the stats command', asy
   raw(Dispatch.MessageDeleteBulk, { ids: [articleId(1)] });
   await tick();
   assert.deepEqual(archive.list({ limit: 5 }).map(post => post.title), ['Current title']);
+  assert.deepEqual(deletedCommands, ['global:old-global', 'global:stats', 'guild:old-local']);
+  client.emit(Events.ShardResume);
+  await tick();
+  assert.deepEqual(registrations, ['guild:stats']);
 
   messages.set(articleId(2), message(2, { content: 'Edited live' }));
   raw(Dispatch.MessageUpdate, { id: articleId(2) });
@@ -231,11 +254,17 @@ test('queues gateway events behind a catch-up and serves the stats command', asy
 
   const replies: InteractionReplyOptions[] = [];
   client.emit(Events.InteractionCreate, {
-    isChatInputCommand: () => true, commandName: 'stats', guildId: 'guild', reply: async (result: InteractionReplyOptions) => { replies.push(result); },
+    isChatInputCommand: () => true, commandName: 'stats', guildId, reply: async (result: InteractionReplyOptions) => { replies.push(result); },
   });
   const reply = replies[0];
-  assert.ok(reply?.content);
-  assert.match(reply.content, /Gateway latency \*\*8 ms\*\*/);
-  assert.match(reply.content, /Requests \*\*0\*\*/);
-  assert.equal(reply.flags, MessageFlags.Ephemeral);
+  const embed = reply?.embeds?.[0];
+  assert.ok(embed instanceof EmbedBuilder);
+  const { title, fields } = embed.toJSON();
+  assert.equal(title, 'Bot and API stats');
+  assert.match(fields?.find(field => field.name === 'Bot status')?.value ?? '', /Gateway latency \*\*8 ms\*\*/);
+  assert.match(fields?.find(field => field.name === 'News archive')?.value ?? '', /Stories \*\*0\*\*/);
+  assert.match(fields?.find(field => field.name === 'HTTP since startup')?.value ?? '', /Requests \*\*0\*\*/);
+  assert.match(fields?.find(field => field.name === 'Requests by route')?.value ?? '', /RSS \*\*0\*\*/);
+  assert.equal(reply.content, undefined);
+  assert.equal(reply.flags, undefined);
 });
