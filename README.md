@@ -30,4 +30,4 @@ The service imports the available destination history when first started, resume
 
 Use `limit` from 1 to 100 (default 50) and optional `category=nerds` or `category=nerds-ai`. Pass `nextCursor` back as `cursor` with the same category to get the next page. Each item includes `id`, `title`, `summary`, `category`, `publishedAt`, `updatedAt`, `links`, and `attachments`. Both data routes support `ETag` and `If-None-Match`.
 
-Run `pnpm test` for the offline sync, parsing, and API checks.
+The service runs directly from TypeScript on Node.js 24. Run `pnpm typecheck` for strict type checking and `pnpm test` for the offline sync, parsing, and API checks.

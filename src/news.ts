@@ -1,23 +1,38 @@
 import { createHash } from 'node:crypto';
-import { MessageFlags } from 'discord.js';
+import { MessageFlags, type APIMessage } from 'discord.js';
 import { Lexer, marked, Parser } from 'marked';
+import type { NewsSource } from './config.ts';
 
-export const categories = ['nerds', 'nerds-ai'];
+export const categories = ['nerds', 'nerds-ai'] as const;
+export type Category = (typeof categories)[number];
+type MessageSource = Pick<APIMessage, 'channel_id'> & Partial<Pick<APIMessage, 'message_reference' | 'webhook_id'>> & { flags?: number };
+export type NewsMessage = MessageSource & Pick<APIMessage, 'id' | 'timestamp'> &
+  Partial<Pick<APIMessage, 'content' | 'edited_timestamp' | 'embeds' | 'attachments'>>;
+export interface NewsPost {
+  id: string;
+  title: string;
+  summary: string | null;
+  category: Category | null;
+  publishedAt: string;
+  updatedAt: string | null;
+  links: string[];
+  attachments: { url: string; name: string; contentType: string | null }[];
+}
 
-export function isFollowedPost(message, config) {
+export function isFollowedPost(message: MessageSource, config: NewsSource) {
   if (message.channel_id !== config.channelId) return false;
   const source = message.message_reference?.channel_id;
-  const isCrosspost = Boolean(message.flags & MessageFlags.IsCrosspost);
+  const isCrosspost = Boolean((message.flags ?? 0) & MessageFlags.IsCrosspost);
   if (isCrosspost && source && config.sourceChannelId) return source === config.sourceChannelId;
   return Boolean(config.followerWebhookId && message.webhook_id === config.followerWebhookId);
 }
 
-export function isSourceDeleted(message) {
-  return Boolean(message.flags & MessageFlags.SourceMessageDeleted);
+export function isSourceDeleted(message: Pick<MessageSource, 'flags'>) {
+  return Boolean((message.flags ?? 0) & MessageFlags.SourceMessageDeleted);
 }
 
-function readLabels(content, config) {
-  const labels = new Set();
+function readLabels(content: string, config: NewsSource) {
+  const labels = new Set<Category | null>();
   let rest = content.trimStart();
   const prefix = /^(?:<@&(\d+)>|@(Nerds(?:[ \t]+AI)?)(?![\p{L}\p{N}_]))\s*/iu;
   for (let match; (match = prefix.exec(rest)); rest = rest.slice(match[0].length)) {
@@ -27,16 +42,16 @@ function readLabels(content, config) {
     else if (roleId === config.nerdsAiRoleId) labels.add('nerds-ai');
     else labels.add(null);
   }
-  return { rest, category: labels.size === 1 ? labels.values().next().value : null };
+  return { rest, category: labels.size === 1 ? labels.values().next().value ?? null : null };
 }
 
-function plainText(text) {
+function plainText(text: string) {
   const discordText = text.replace(/<a?:([\w]+):\d+>/g, ':$1:').replace(/<[@#][!&]?\d+>/g, '');
   const parser = new Parser();
   return parser.parseInline(Lexer.lexInline(discordText), parser.textRenderer).replace(/\s+/g, ' ').trim();
 }
 
-function articleUrl(value) {
+function articleUrl(value: string | undefined) {
   if (!value) return null;
   try {
     const url = new URL(value);
@@ -47,7 +62,7 @@ function articleUrl(value) {
   return null;
 }
 
-export function normalizePost(message, config) {
+export function normalizePost(message: NewsMessage, config: NewsSource): NewsPost | null {
   if (!isFollowedPost(message, config) || isSourceDeleted(message)) return null;
 
   const { rest, category } = readLabels(message.content ?? '', config);
@@ -61,8 +76,8 @@ export function normalizePost(message, config) {
   const summary = body.map(line => plainText(line.replace(/^>+\s*/, ''))).filter(Boolean).join(' ')
     || embeds.find(embed => embed.description)?.description?.trim() || null;
 
-  const links = new Set();
-  const addLink = value => {
+  const links = new Set<string>();
+  const addLink = (value: string | undefined) => {
     const url = articleUrl(value);
     if (url) links.add(url);
   };
@@ -75,9 +90,10 @@ export function normalizePost(message, config) {
 
   if (!title && !summary && !links.size && !message.attachments?.length) return null;
   const id = createHash('sha256').update(`${message.channel_id}/${message.id}`).digest('hex').slice(0, 32);
+  const primaryLink = links.values().next().value;
   return {
     id,
-    title: title || (links.size ? new URL(links.values().next().value).hostname : 'News update'),
+    title: title || (primaryLink ? new URL(primaryLink).hostname : 'News update'),
     summary,
     category,
     publishedAt: new Date(message.timestamp).toISOString(),

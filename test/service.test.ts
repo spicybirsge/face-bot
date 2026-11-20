@@ -3,21 +3,25 @@ import { EventEmitter, once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import { setImmediate as tick } from 'node:timers/promises';
-import { Events, GatewayDispatchEvents as Dispatch, MessageFlags } from 'discord.js';
-import { createApp, createRequestStats } from '../src/api.js';
-import { acquireWriter, openArchive } from '../src/archive.js';
-import { connectBot } from '../src/discord.js';
-import { normalizePost } from '../src/news.js';
-import { createSync } from '../src/sync.js';
+import {
+  Events, GatewayDispatchEvents as Dispatch, MessageFlags,
+  type ApplicationCommandData, type Client, type InteractionReplyOptions,
+} from 'discord.js';
+import { createApp, createRequestStats } from '../src/api.ts';
+import { acquireWriter, openArchive } from '../src/archive.ts';
+import { connectBot } from '../src/discord.ts';
+import { normalizePost, type NewsMessage, type NewsPost } from '../src/news.ts';
+import { createSync, type DiscordHistory } from '../src/sync.ts';
 
 const config = {
   channelId: '111111111111111111', sourceChannelId: '222222222222222222',
   followerWebhookId: '333333333333333333', nerdsRoleId: '444444444444444444',
+  nerdsAiRoleId: null, token: 'test-token',
 };
-const articleId = number => String(100000000000000000n + BigInt(number));
-function message(number, fields = {}) {
+const articleId = (number: number) => String(100000000000000000n + BigInt(number));
+function message(number: number, fields: Partial<NewsMessage> = {}): NewsMessage {
   return {
     id: articleId(number), channel_id: config.channelId, flags: MessageFlags.IsCrosspost,
     message_reference: { channel_id: config.sourceChannelId },
@@ -27,19 +31,23 @@ function message(number, fields = {}) {
   };
 }
 
-function fixtures(t) {
+function fixtures(t: TestContext) {
   const archive = openArchive(':memory:', 'test');
   t.after(() => archive.close());
-  const messages = new Map();
-  const calls = [];
-  const discord = {
+  const messages = new Map<string, NewsMessage>();
+  const calls: (string | null)[] = [];
+  const discord: DiscordHistory & { fetchMessage(id: string): Promise<NewsMessage> } = {
     async verifyChannel() {},
     async fetchPage(limit, before) {
       calls.push(before);
       return [...messages.values()].filter(post => !before || BigInt(post.id) < BigInt(before))
         .sort((a, b) => b.id.localeCompare(a.id)).slice(0, limit);
     },
-    async fetchMessage(id) { return messages.get(id); },
+    async fetchMessage(id) {
+      const post = messages.get(id);
+      assert.ok(post, `Missing fixture message ${id}`);
+      return post;
+    },
   };
   const sync = createSync({ archive, discord, config });
   return { archive, messages, calls, discord, sync };
@@ -47,14 +55,15 @@ function fixtures(t) {
 
 test('normalizes followed posts, prefers source links, and leaves ambiguous labels unset', () => {
   const posted = normalizePost(message(1), config);
+  assert.ok(posted);
   assert.equal(posted.category, 'nerds-ai');
   assert.equal(posted.title, '🔑 Story 1');
   assert.equal(posted.summary, 'A useful update.');
   assert.deepEqual(posted.links, ['https://example.com/source?a=1&b=2', 'https://example.com/feature_(technology)']);
-  assert.equal(normalizePost(message(2, { content: `<@&${config.nerdsRoleId}> Headline` }), config).category, 'nerds');
-  assert.equal(normalizePost(message(3, { content: '@Nerds @Nerds AI News' }), config).category, null);
-  assert.equal(normalizePost(message(4, { content: 'Headline about @Nerds' }), config).category, null);
-  assert.equal(normalizePost(message(4, { content: '[title](javascript:alert(1))' }), config).links.length, 0);
+  assert.equal(normalizePost(message(2, { content: `<@&${config.nerdsRoleId}> Headline` }), config)?.category, 'nerds');
+  assert.equal(normalizePost(message(3, { content: '@Nerds @Nerds AI News' }), config)?.category, null);
+  assert.equal(normalizePost(message(4, { content: 'Headline about @Nerds' }), config)?.category, null);
+  assert.equal(normalizePost(message(4, { content: '[title](javascript:alert(1))' }), config)?.links.length, 0);
   assert.equal(normalizePost(message(5, { message_reference: { channel_id: '9' }, webhook_id: config.followerWebhookId }), config), null);
   assert.equal(normalizePost(message(6, { flags: 0, message_reference: undefined, webhook_id: '9' }), config), null);
   assert.ok(normalizePost(message(7, { message_reference: undefined, webhook_id: config.followerWebhookId }), config));
@@ -73,7 +82,7 @@ test('resumes a backfill with unmatched pages and catches messages published dur
     return fetchPage(limit, before);
   };
   await assert.rejects(sync.fullScan(), /Temporary network failure/);
-  assert.equal(archive.getState('backfill').before, articleId(111));
+  assert.equal(archive.getState('backfill')?.before, articleId(111));
   assert.equal(archive.count().total, 0);
 
   fail = false;
@@ -105,7 +114,7 @@ test('catches a multi-page reconnect gap and only prunes after verified full res
   assert.equal(archive.count().total, 106);
   discord.verifyChannel = async () => {};
   assert.equal((await sync.fullScan(true)).total, 105);
-  assert.equal(archive.list({ limit: 106 }).at(-1).title, 'Corrected title');
+  assert.equal(archive.list({ limit: 106 }).at(-1)?.title, 'Corrected title');
 });
 
 test('enforces a single archive writer and releases it at shutdown', () => {
@@ -133,23 +142,29 @@ test('serves docs, paginated JSON and RSS with ETags and finished request counte
   const app = createApp({ archive, publicBaseUrl: 'https://news.example.org', requestStats });
   const server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  t.after(() => new Promise(resolve => server.close(resolve)));
-  const get = (path, options) => fetch(`http://127.0.0.1:${server.address().port}${path}`, options);
-  const conditional = etag => ({ headers: { 'If-None-Match': etag, 'Cache-Control': 'max-age=0' } });
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  const get = (path: string, options?: RequestInit) => fetch(`http://127.0.0.1:${address.port}${path}`, options);
+  const conditional = (etag: string | null): RequestInit => {
+    assert.ok(etag);
+    return { headers: { 'If-None-Match': etag, 'Cache-Control': 'max-age=0' } };
+  };
+  const readPage = async (response: Response) => await response.json() as { items: NewsPost[]; nextCursor: string | null };
 
   const docs = await get('/');
-  assert.match(docs.headers.get('content-type'), /text\/html/);
+  assert.match(docs.headers.get('content-type') ?? '', /text\/html/);
   assert.match(await docs.text(), /JSON archive/);
 
   const response = await get('/v1/news?limit=1');
   const etag = response.headers.get('etag');
   assert.equal(response.headers.get('access-control-allow-origin'), '*');
-  const page = await response.json();
+  const page = await readPage(response);
   assert.equal(page.items[0].title, '🔑 Story 3');
-  const second = await (await get(`/v1/news?cursor=${page.nextCursor}`)).json();
+  const second = await readPage(await get(`/v1/news?cursor=${page.nextCursor}`));
   assert.deepEqual(second.items.map(post => post.title), ['Story & details', 'Story without label']);
   assert.equal(second.nextCursor, null);
-  assert.equal((await (await get('/v1/news?category=nerds')).json()).items.length, 1);
+  assert.equal((await readPage(await get('/v1/news?category=nerds'))).items.length, 1);
   for (const query of ['?limit=101', '?limit=1&limit=2', '?cursor=x', '?category=other']) {
     assert.equal((await get(`/v1/news${query}`)).status, 400);
   }
@@ -162,11 +177,11 @@ test('serves docs, paginated JSON and RSS with ETags and finished request counte
     } });
     assert.equal(preflight.status, 204);
     assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
-    assert.match(preflight.headers.get('access-control-allow-headers'), /if-none-match/i);
+    assert.match(preflight.headers.get('access-control-allow-headers') ?? '', /if-none-match/i);
   }
 
   const feed = await get('/feed.xml');
-  assert.match(feed.headers.get('content-type'), /application\/rss\+xml/);
+  assert.match(feed.headers.get('content-type') ?? '', /application\/rss\+xml/);
   const text = await feed.text();
   assert.match(text, /<title>Story &amp; details<\/title>/);
   assert.match(text, /<link>https:\/\/example.com\/\?a=1&amp;b=2<\/link>/);
@@ -174,7 +189,7 @@ test('serves docs, paginated JSON and RSS with ETags and finished request counte
   assert.ok(text.includes(`<guid isPermaLink="false">${page.items[0].id}</guid>`));
   assert.equal((await get('/feed.xml', conditional(feed.headers.get('etag')))).status, 304);
   sync.record(message(3, { content: 'Updated headline', edited_timestamp: '2026-11-09T00:00:00Z' }));
-  const edited = await (await get('/v1/news?limit=1', conditional(etag))).json();
+  const edited = await readPage(await get('/v1/news?limit=1', conditional(etag)));
   assert.equal(edited.items[0].id, page.items[0].id);
   assert.equal(edited.items[0].title, 'Updated headline');
   sync.remove([articleId(3)]);
@@ -191,12 +206,12 @@ test('queues gateway events behind a catch-up and serves the stats command', asy
     login: async () => {}, destroy: async () => {}, uptime: 1000,
     ws: { ping: 8 }, guilds: { cache: new Map([['guild', {}]]) },
     channels: { fetch: async () => ({ guildId: 'guild' }) },
-    application: { commands: { create: async command => assert.equal(command.name, 'stats') } },
+    application: { commands: { create: async (command: ApplicationCommandData) => assert.equal(command.name, 'stats') } },
   });
-  discord.client = client;
-  const stop = connectBot({ config, archive, discord, requestStats: createRequestStats() });
+  const connection = { ...discord, client: client as unknown as Client };
+  const stop = connectBot({ config, archive, discord: connection, requestStats: createRequestStats() });
   t.after(stop);
-  const raw = (event, data) => client.emit(Events.Raw, { t: event, d: { channel_id: config.channelId, ...data } });
+  const raw = (event: Dispatch, data: object) => client.emit(Events.Raw, { t: event, d: { channel_id: config.channelId, ...data } });
   messages.set(articleId(1), message(1));
   messages.set(articleId(2), message(2, { content: 'Current title' }));
 
@@ -214,10 +229,12 @@ test('queues gateway events behind a catch-up and serves the stats command', asy
   await tick();
   assert.equal(archive.count().total, 0);
 
-  let reply;
+  const replies: InteractionReplyOptions[] = [];
   client.emit(Events.InteractionCreate, {
-    isChatInputCommand: () => true, commandName: 'stats', guildId: 'guild', reply: async result => { reply = result; },
+    isChatInputCommand: () => true, commandName: 'stats', guildId: 'guild', reply: async (result: InteractionReplyOptions) => { replies.push(result); },
   });
+  const reply = replies[0];
+  assert.ok(reply?.content);
   assert.match(reply.content, /Gateway latency \*\*8 ms\*\*/);
   assert.match(reply.content, /Requests \*\*0\*\*/);
   assert.equal(reply.flags, MessageFlags.Ephemeral);

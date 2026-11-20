@@ -1,13 +1,22 @@
 import {
   ChannelType, Client, Events, GatewayDispatchEvents, GatewayIntentBits,
   MessageFlags, PermissionFlagsBits, RESTJSONErrorCodes, Routes,
+  type GatewayDispatchPayload, type RESTGetAPIChannelMessageResult, type RESTGetAPIChannelMessagesResult,
 } from 'discord.js';
-import { isFollowedPost, isSourceDeleted } from './news.js';
-import { createSync } from './sync.js';
+import type { RequestStats } from './api.ts';
+import type { Archive } from './archive.ts';
+import type { Config, NewsSource } from './config.ts';
+import { isFollowedPost, isSourceDeleted, type NewsMessage } from './news.ts';
+import { createSync, type DiscordHistory } from './sync.ts';
 
 const retryDelay = 30_000;
 
-export function createDiscord(config) {
+interface DiscordConnection extends DiscordHistory {
+  client: Client;
+  fetchMessage(id: string): Promise<NewsMessage>;
+}
+
+export function createDiscord(config: NewsSource): DiscordConnection {
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   });
@@ -16,7 +25,7 @@ export function createDiscord(config) {
     client,
     async verifyChannel() {
       const channel = await client.channels.fetch(config.channelId, { force: true });
-      if (!channel || ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) {
+      if (!channel || (channel.type !== ChannelType.GuildText && channel.type !== ChannelType.GuildAnnouncement)) {
         throw new Error('DISCORD_NEWS_CHANNEL_ID must point to a server text or announcement channel the bot can access');
       }
       await channel.guild.roles.fetch();
@@ -24,25 +33,27 @@ export function createDiscord(config) {
       if (!channel.permissionsFor(me).has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory])) {
         throw new Error('The bot needs View Channel and Read Message History in the configured news channel');
       }
-      return channel;
     },
     fetchPage(limit, before) {
       const query = new URLSearchParams({ limit: String(limit) });
       if (before) query.set('before', before);
-      return client.rest.get(Routes.channelMessages(config.channelId), { query });
+      return client.rest.get(Routes.channelMessages(config.channelId), { query }) as Promise<RESTGetAPIChannelMessagesResult>;
     },
     fetchMessage(id) {
-      return client.rest.get(Routes.channelMessage(config.channelId, id));
+      return client.rest.get(Routes.channelMessage(config.channelId, id)) as Promise<RESTGetAPIChannelMessageResult>;
     },
   };
 }
 
-export function reportDiscordError(context, error) {
-  const detail = error.status ? `HTTP ${error.status}, code ${error.code}` : (error.code ?? error.message);
+export function reportDiscordError(context: string, error: unknown) {
+  const code = error instanceof Error && 'code' in error ? error.code : undefined;
+  const detail = error instanceof Error && 'status' in error
+    ? `HTTP ${error.status}, code ${code}`
+    : (code ?? (error instanceof Error ? error.message : 'Unknown error'));
   console.error(`${context} failed (${detail})`);
 }
 
-function statsMessage(client, archive, requestStats) {
+function statsMessage(client: Client, archive: Archive, requestStats: RequestStats) {
   const http = requestStats.snapshot();
   const posts = archive.count();
   const uptimeSeconds = Math.floor((client.uptime ?? 0) / 1000);
@@ -62,21 +73,26 @@ function statsMessage(client, archive, requestStats) {
   ].join('\n');
 }
 
-export function connectBot({ config, archive, discord, requestStats }) {
+export function connectBot({ config, archive, discord, requestStats }: {
+  config: NewsSource & Pick<Config, 'token'>;
+  archive: Archive;
+  discord: DiscordConnection;
+  requestStats: RequestStats;
+}) {
   const { client } = discord;
   const sync = createSync({ archive, discord, config });
-  let queue = Promise.resolve();
+  let queue: Promise<void> = Promise.resolve();
   let closing = false;
   let syncPending = false;
   let syncAgain = false;
-  let syncRetry;
-  let loginRetry;
-  let loginAttempt = Promise.resolve();
-  let statsGuildId;
+  let syncRetry: NodeJS.Timeout | undefined;
+  let loginRetry: NodeJS.Timeout | undefined;
+  let loginAttempt: Promise<string | void> = Promise.resolve();
+  let statsGuildId: string | undefined;
   let statsRegistered = false;
-  let statsRegistration;
+  let statsRegistration: Promise<void> | undefined;
 
-  function enqueue(work) {
+  function enqueue(work: () => void | Promise<void>) {
     queue = queue.then(() => closing ? undefined : work()).catch(error => reportDiscordError('Discord archive update', error));
   }
 
@@ -109,9 +125,11 @@ export function connectBot({ config, archive, discord, requestStats }) {
   function registerStats() {
     if (closing || statsRegistered || statsRegistration) return;
     statsRegistration = client.channels.fetch(config.channelId).then(async channel => {
-      if (!channel?.guildId) throw new Error('Could not find the news channel’s server');
+      if (!channel || !('guildId' in channel) || !channel.guildId) throw new Error('Could not find the news channel’s server');
+      const application = client.application;
+      if (!application) throw new Error('Discord application is unavailable');
       statsGuildId = channel.guildId;
-      await client.application.commands.create({
+      await application.commands.create({
         name: 'stats', description: 'Show bot, archive, and HTTP request statistics',
       }, statsGuildId);
       statsRegistered = true;
@@ -120,17 +138,17 @@ export function connectBot({ config, archive, discord, requestStats }) {
     });
   }
 
-  async function refreshMessage(id) {
+  async function refreshMessage(id: string) {
     try {
       sync.record(await discord.fetchMessage(id));
     } catch (error) {
-      if (error.code !== RESTJSONErrorCodes.UnknownMessage) throw error;
+      if (!(error instanceof Error && 'code' in error && error.code === RESTJSONErrorCodes.UnknownMessage)) throw error;
       sync.remove([id]);
     }
   }
 
-  client.on(Events.Raw, ({ t: event, d: data }) => {
-    if (data?.channel_id !== config.channelId) return;
+  client.on(Events.Raw, ({ t: event, d: data }: GatewayDispatchPayload) => {
+    if (!data || !('channel_id' in data) || data.channel_id !== config.channelId) return;
     switch (event) {
       case GatewayDispatchEvents.MessageCreate:
         if (isFollowedPost(data, config)) {
