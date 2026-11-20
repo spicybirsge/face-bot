@@ -115,7 +115,11 @@ export function openArchive(path: string, scope: string) {
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     return db.prepare(`SELECT article FROM posts ${where} ORDER BY published_at DESC, id DESC LIMIT ?`)
-      .all(...parameters, limit).map(row => JSON.parse(row.article as string) as NewsPost);
+      .all(...parameters, limit).map(row => {
+        const post = JSON.parse(row.article as string) as NewsPost;
+        // Older archives only stored the normalized article fields.
+        return { ...post, raw_content: post.raw_content ?? null };
+      });
   }
 
   return {
