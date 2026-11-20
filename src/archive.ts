@@ -16,6 +16,7 @@ interface SyncState {
   backfill: BackfillProgress;
   checkpoint: string;
   lastSyncAt: string;
+  lastFullSyncAt: string;
 }
 
 // A separate SQLite lock lets the service or an operator sync own the archive
@@ -84,6 +85,17 @@ export function openArchive(path: string, scope: string) {
   const deletePost = db.prepare('DELETE FROM posts WHERE message_id = ?');
   const prune = db.prepare('DELETE FROM posts WHERE scan_id IS NOT ?');
   const count = db.prepare('SELECT count(*) AS total, count(*) - count(category) AS uncategorized FROM posts');
+  const attachments = db.prepare(`
+    SELECT json_extract(attachment.value, '$.url') AS url
+    FROM posts, json_each(posts.article, '$.attachments') AS attachment
+    WHERE attachment.type = 'object'
+  `);
+
+  function* attachmentUrls() {
+    for (const { url } of attachments.iterate()) {
+      if (typeof url === 'string') yield url;
+    }
+  }
 
   function transaction<T>(work: () => T): T {
     db.exec('BEGIN IMMEDIATE');
@@ -123,7 +135,7 @@ export function openArchive(path: string, scope: string) {
   }
 
   return {
-    getState, setState, transaction, writePost, list,
+    getState, setState, transaction, writePost, list, attachmentUrls,
     count: () => {
       const row = count.get();
       return { total: Number(row?.total), uncategorized: Number(row?.uncategorized) };

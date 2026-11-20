@@ -61,6 +61,7 @@ function statsEmbed(client: Client, archive: Archive, requestStats: RequestStats
   const minutes = Math.floor(uptimeSeconds / 60) % 60;
   const latency = client.ws.ping >= 0 ? `${Math.round(client.ws.ping)} ms` : 'Unavailable';
   const lastSync = archive.getState('lastSyncAt');
+  const lastFullSync = archive.getState('lastFullSyncAt');
   return new EmbedBuilder()
     .setTitle('Bot and API stats')
     .setColor(Colors.Blurple)
@@ -81,6 +82,7 @@ function statsEmbed(client: Client, archive: Archive, requestStats: RequestStats
           `Stories **${posts.total}**`,
           `Uncategorized **${posts.uncategorized}**`,
           `Last sync ${lastSync ? `<t:${Math.floor(Date.parse(lastSync) / 1000)}:R>` : '**Pending**'}`,
+          `Last full sync ${lastFullSync ? `<t:${Math.floor(Date.parse(lastFullSync) / 1000)}:R>` : '**Pending**'}`,
         ].join('\n'),
         inline: true,
       },
@@ -110,7 +112,9 @@ export function connectBot({ config, archive, discord, requestStats }: {
   let closing = false;
   let syncPending = false;
   let syncAgain = false;
-  let syncRetry: NodeJS.Timeout | undefined;
+  let syncRetry: 'full' | 'catch-up' | null = null;
+  let syncTimer: NodeJS.Timeout | undefined;
+  let nextSyncAt = Infinity;
   let loginRetry: NodeJS.Timeout | undefined;
   let loginAttempt: Promise<string | void> = Promise.resolve();
   let statsGuildId: string | undefined;
@@ -122,26 +126,38 @@ export function connectBot({ config, archive, discord, requestStats }: {
     queue = queue.then(() => closing ? undefined : work()).catch(error => reportDiscordError('Discord archive update', error));
   }
 
-  function scheduleCatchUp() {
+  function scheduleSyncAt(at: number) {
+    if (closing) return;
+    clearTimeout(syncTimer);
+    nextSyncAt = at;
+    syncTimer = setTimeout(scheduleSync, Math.max(0, at - Date.now()));
+  }
+
+  function scheduleSync() {
     if (closing) return;
     if (syncPending) {
       syncAgain = true;
       return;
     }
-    clearTimeout(syncRetry);
+    clearTimeout(syncTimer);
     syncPending = true;
     enqueue(async () => {
       try {
-        const result = await sync.catchUp();
-        console.log(`History sync scanned ${result.scanned} messages. ${result.total} stories archived, ${result.uncategorized} uncategorized.`);
+        const full = syncRetry === 'full'
+          || (archive.getState('backfill')?.complete && sync.nextFullSyncAt() <= Date.now());
+        syncRetry = full ? 'full' : 'catch-up';
+        const result = full ? await sync.fullScan(true) : await sync.catchUp();
+        syncRetry = null;
+        console.log(`${full ? 'Full resync' : 'History sync'} scanned ${result.scanned} messages. ${result.total} stories archived, ${result.uncategorized} uncategorized.`);
+        scheduleSyncAt(sync.nextFullSyncAt());
       } catch (error) {
-        if (!closing) syncRetry = setTimeout(scheduleCatchUp, retryDelay);
+        scheduleSyncAt(Date.now() + retryDelay);
         throw error;
       } finally {
         syncPending = false;
         if (syncAgain) {
           syncAgain = false;
-          scheduleCatchUp();
+          scheduleSync();
         }
       }
     });
@@ -177,9 +193,17 @@ export function connectBot({ config, archive, discord, requestStats }: {
     });
   }
 
+  function recordMessage(message: NewsMessage) {
+    sync.record(message);
+    if (message.attachments?.length && !syncPending && !syncRetry) {
+      const dueAt = sync.nextFullSyncAt();
+      if (dueAt < nextSyncAt) scheduleSyncAt(dueAt);
+    }
+  }
+
   async function refreshMessage(id: string) {
     try {
-      sync.record(await discord.fetchMessage(id));
+      recordMessage(await discord.fetchMessage(id));
     } catch (error) {
       if (!(error instanceof Error && 'code' in error && error.code === RESTJSONErrorCodes.UnknownMessage)) throw error;
       sync.remove([id]);
@@ -193,7 +217,7 @@ export function connectBot({ config, archive, discord, requestStats }: {
         if (isFollowedPost(data, config)) {
           // A pending REST scan can already contain an edit to this message.
           if (syncPending) enqueue(() => refreshMessage(data.id));
-          else enqueue(() => sync.record(data));
+          else enqueue(() => recordMessage(data));
         }
         break;
       case GatewayDispatchEvents.MessageUpdate:
@@ -211,7 +235,7 @@ export function connectBot({ config, archive, discord, requestStats }: {
 
   function onGatewayReady() {
     registerStats();
-    scheduleCatchUp();
+    scheduleSync();
   }
   client.on(Events.ClientReady, onGatewayReady);
   client.on(Events.ShardResume, onGatewayReady);
@@ -237,7 +261,7 @@ export function connectBot({ config, archive, discord, requestStats }: {
 
   return async () => {
     closing = true;
-    clearTimeout(syncRetry);
+    clearTimeout(syncTimer);
     clearTimeout(loginRetry);
     clearTimeout(statsRetry);
     await client.destroy();

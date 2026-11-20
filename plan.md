@@ -16,7 +16,7 @@ Build a discord.js bot that imports and follows published announcements copied i
 
 ## 3. Import the available channel history
 
-- Provide an operator command for the initial backfill and manual resync. Fetch up to 100 messages per Discord request and page backward using the oldest fetched message ID. The estimate for 591 available messages is six history page requests. The final count of archived stories depends on which messages match the followed source.
+- Provide an operator command for the initial backfill and manual resync. Fetch up to 100 messages per Discord request and page backward using the oldest fetched message ID until an empty page confirms the end. The final count of archived stories depends on which messages match the followed source.
 - Fetch pages sequentially and let discord.js queue requests around rate limits. Write each page and its progress cursor in one SQLite transaction so the importer can resume after a failure. Record progress across fetched messages even if a page has zero matching stories.
 - Report the number scanned, archived, and left uncategorized, plus whether the backfill completed. Re-running the import should keep article IDs stable and avoid duplicate stories.
 
@@ -24,7 +24,7 @@ Build a discord.js bot that imports and follows published announcements copied i
 
 - Subscribe to message create, update, and delete events, including bulk deletes. Apply updates to the existing record and remove a story from both outputs when the copy is deleted or Discord marks its upstream post as deleted.
 - On startup or after a connection gap, page from the newest messages back to the last successful sync checkpoint. Advance the checkpoint only after the gap is covered. Coordinate events and fetches so a page cannot overwrite a newer edit or restore a deleted story.
-- Use the operator resync to reconcile older edits or deletions missed while offline. Only remove missing rows after a complete scan with verified channel access. Keep serving the saved archive during a Discord outage.
+- Run a full resync periodically to refresh signed attachment URLs and reconcile older edits or deletions missed while offline. Keep the operator command available. Only remove missing rows after a complete scan with verified channel access. Keep serving the saved archive during a Discord outage.
 
 ## 5. Serve the JSON archive and RSS feed
 

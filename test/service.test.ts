@@ -131,6 +131,25 @@ test('catches a multi-page reconnect gap and only prunes after verified full res
   assert.equal(archive.list({ limit: 106 }).at(-1)?.title, 'Corrected title');
 });
 
+test('continues past short history pages before advancing the checkpoint or pruning', async t => {
+  const { archive, messages, discord, sync } = fixtures(t);
+  const fetchPage = discord.fetchPage;
+  discord.fetchPage = (limit, before) => fetchPage(Math.min(limit, 2), before);
+  for (let n = 1; n <= 5; n++) messages.set(articleId(n), message(n));
+  assert.equal((await sync.fullScan()).total, 5);
+
+  messages.delete(articleId(2));
+  const oldest = message(1, { content: 'Edited oldest story' });
+  messages.set(oldest.id, oldest);
+  assert.equal((await sync.fullScan(true)).total, 4);
+  assert.equal(archive.list({ limit: 5 }).at(-1)?.title, 'Edited oldest story');
+
+  for (let n = 6; n <= 8; n++) messages.set(articleId(n), message(n));
+  assert.equal((await sync.catchUp()).scanned, 3);
+  assert.equal(archive.count().total, 7);
+  assert.equal(archive.getState('checkpoint'), articleId(8));
+});
+
 test('enforces a single archive writer and releases it at shutdown', () => {
   const folder = mkdtempSync(join(tmpdir(), 'face-bot-'));
   const path = join(folder, 'news.sqlite');
@@ -307,8 +326,97 @@ test('queues gateway events behind a catch-up and replaces stale slash commands 
   assert.equal(title, 'Bot and API stats');
   assert.match(fields?.find(field => field.name === 'Bot status')?.value ?? '', /Gateway latency \*\*8 ms\*\*/);
   assert.match(fields?.find(field => field.name === 'News archive')?.value ?? '', /Stories \*\*0\*\*/);
+  assert.match(fields?.find(field => field.name === 'News archive')?.value ?? '', /Last full sync <t:\d+:R>/);
   assert.match(fields?.find(field => field.name === 'HTTP since startup')?.value ?? '', /Requests \*\*0\*\*/);
   assert.match(fields?.find(field => field.name === 'Requests by route')?.value ?? '', /RSS \*\*0\*\*/);
   assert.equal(reply.content, undefined);
   assert.equal(reply.flags, undefined);
+});
+
+test('refreshes attachment URLs on overdue startup, before expiry, and after twelve hours', async t => {
+  const hour = 60 * 60_000;
+  const initial = new Date('2026-11-21T00:00:00Z');
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: initial });
+  const { archive, messages, calls, discord, sync } = fixtures(t);
+  function withAttachment(number: number, expiresIn: number) {
+    const expiry = Math.floor((Date.now() + expiresIn) / 1000).toString(16);
+    const url = `https://cdn.discordapp.com/attachments/${config.channelId}/${articleId(number)}/image.png?ex=${expiry}&hm=signature`;
+    const post = message(number, {
+      attachments: [{ id: articleId(number), filename: 'image.png', url, proxy_url: url, size: 1 }],
+    });
+    messages.set(post.id, post);
+    return post;
+  }
+  const attachmentUrl = () => archive.list({ limit: 2 }).at(-1)?.attachments[0].url;
+
+  withAttachment(1, 24 * hour);
+  await sync.catchUp();
+  const originalUrl = attachmentUrl();
+  const originalId = archive.list({ limit: 1 })[0].id;
+  t.mock.timers.setTime(initial.getTime() + 13 * hour);
+  const refreshed = withAttachment(1, 4 * hour);
+
+  const client = Object.assign(new EventEmitter(), {
+    login: async () => {}, destroy: async () => {},
+    channels: { fetch: async () => ({ guildId: 'guild' }) },
+    application: { commands: { create: async () => {}, fetch: async () => [] } },
+  });
+  const fetchPage = discord.fetchPage;
+  let fail = true;
+  discord.fetchPage = async (limit, before) => {
+    if (fail) {
+      fail = false;
+      throw new Error('Temporary network failure');
+    }
+    return fetchPage(limit, before);
+  };
+  const stop = connectBot({ config, archive, discord: { ...discord, client: client as unknown as Client }, requestStats: createRequestStats() });
+  t.after(stop);
+
+  client.emit(Events.ClientReady);
+  await tick();
+  assert.equal(archive.getState('lastFullSyncAt'), initial.toISOString());
+  assert.equal(attachmentUrl(), originalUrl);
+  t.mock.timers.tick(30_000);
+  await tick();
+  assert.equal(attachmentUrl(), refreshed.attachments?.[0].url);
+  const firstResync = new Date().toISOString();
+  assert.equal(archive.getState('lastFullSyncAt'), firstResync);
+
+  t.mock.timers.tick(1_000);
+  client.emit(Events.ShardResume);
+  await tick();
+  assert.equal(archive.getState('lastSyncAt'), new Date().toISOString());
+  assert.equal(archive.getState('lastFullSyncAt'), firstResync);
+
+  const shortLived = withAttachment(2, 2 * hour);
+  client.emit(Events.Raw, { t: Dispatch.MessageCreate, d: shortLived });
+  await tick();
+  const latest = withAttachment(1, 24 * hour);
+  withAttachment(2, 24 * hour);
+  const before = calls.length;
+  t.mock.timers.tick(hour - 1);
+  await tick();
+  assert.equal(calls.length, before);
+  t.mock.timers.tick(1);
+  await tick();
+  assert.equal(calls.length, before + 2);
+  assert.equal(attachmentUrl(), latest.attachments?.[0].url);
+  assert.equal(archive.list({ limit: 2 }).at(-1)?.id, originalId);
+  assert.equal(archive.getState('lastFullSyncAt'), new Date().toISOString());
+
+  t.mock.timers.tick(12 * hour);
+  await tick();
+  assert.equal(calls.length, before + 4);
+  assert.equal(archive.getState('lastFullSyncAt'), new Date().toISOString());
+
+  const nearlyExpired = withAttachment(2, 2 * 60_000);
+  client.emit(Events.Raw, { t: Dispatch.MessageUpdate, d: nearlyExpired });
+  await tick();
+  assert.equal(archive.list({ limit: 1 })[0].attachments[0].url, nearlyExpired.attachments?.[0].url);
+  const renewed = withAttachment(2, 24 * hour);
+  t.mock.timers.tick(60_000);
+  await tick();
+  assert.equal(calls.length, before + 6);
+  assert.equal(archive.list({ limit: 1 })[0].attachments[0].url, renewed.attachments?.[0].url);
 });
