@@ -1,6 +1,6 @@
 import {
-  ChannelType, Client, Events, GatewayDispatchEvents, GatewayIntentBits,
-  MessageFlags, PermissionFlagsBits, RESTJSONErrorCodes, Routes,
+  ApplicationCommandType, ChannelType, Client, Colors, EmbedBuilder, Events,
+  GatewayDispatchEvents, GatewayIntentBits, PermissionFlagsBits, RESTJSONErrorCodes, Routes,
   type GatewayDispatchPayload, type RESTGetAPIChannelMessageResult, type RESTGetAPIChannelMessagesResult,
 } from 'discord.js';
 import type { RequestStats } from './api.ts';
@@ -53,7 +53,7 @@ export function reportDiscordError(context: string, error: unknown) {
   console.error(`${context} failed (${detail})`);
 }
 
-function statsMessage(client: Client, archive: Archive, requestStats: RequestStats) {
+function statsEmbed(client: Client, archive: Archive, requestStats: RequestStats) {
   const http = requestStats.snapshot();
   const posts = archive.count();
   const uptimeSeconds = Math.floor((client.uptime ?? 0) / 1000);
@@ -61,16 +61,41 @@ function statsMessage(client: Client, archive: Archive, requestStats: RequestSta
   const minutes = Math.floor(uptimeSeconds / 60) % 60;
   const latency = client.ws.ping >= 0 ? `${Math.round(client.ws.ping)} ms` : 'Unavailable';
   const lastSync = archive.getState('lastSyncAt');
-  return [
-    '**Bot**',
-    `Uptime **${hours}h ${minutes}m ${uptimeSeconds % 60}s** · Gateway latency **${latency}** · Servers **${client.guilds.cache.size}**`,
-    '**Archive**',
-    `Stories **${posts.total}** · Uncategorized **${posts.uncategorized}**`,
-    `Last history sync ${lastSync ? `<t:${Math.floor(Date.parse(lastSync) / 1000)}:R>` : '**Pending**'}`,
-    '**HTTP since process start**',
-    `Requests **${http.requests}** · Errors **${http.errors}** · Not modified **${http.notModified}** · Avg response **${http.averageMs.toFixed(1)} ms**`,
-    `JSON **${http.routes['/v1/news']}** · RSS **${http.routes['/feed.xml']}** · Docs **${http.routes['/']}** · Other **${http.routes.other}**`,
-  ].join('\n');
+  return new EmbedBuilder()
+    .setTitle('Bot and API stats')
+    .setColor(Colors.Blurple)
+    .setTimestamp()
+    .addFields(
+      {
+        name: 'Bot status',
+        value: [
+          `Uptime **${hours}h ${minutes}m ${uptimeSeconds % 60}s**`,
+          `Gateway latency **${latency}**`,
+          `Servers **${client.guilds.cache.size}**`,
+        ].join('\n'),
+        inline: true,
+      },
+      {
+        name: 'News archive',
+        value: [
+          `Stories **${posts.total}**`,
+          `Uncategorized **${posts.uncategorized}**`,
+          `Last sync ${lastSync ? `<t:${Math.floor(Date.parse(lastSync) / 1000)}:R>` : '**Pending**'}`,
+        ].join('\n'),
+        inline: true,
+      },
+      {
+        name: 'HTTP since startup',
+        value: [
+          `Requests **${http.requests}** · Errors **${http.errors}** · Not modified **${http.notModified}**`,
+          `Average response **${http.averageMs.toFixed(1)} ms**`,
+        ].join('\n'),
+      },
+      {
+        name: 'Requests by route',
+        value: `JSON **${http.routes['/v1/news']}** · RSS **${http.routes['/feed.xml']}** · Docs **${http.routes['/']}** · Other **${http.routes.other}**`,
+      },
+    );
 }
 
 export function connectBot({ config, archive, discord, requestStats }: {
@@ -91,6 +116,7 @@ export function connectBot({ config, archive, discord, requestStats }: {
   let statsGuildId: string | undefined;
   let statsRegistered = false;
   let statsRegistration: Promise<void> | undefined;
+  let statsRetry: NodeJS.Timeout | undefined;
 
   function enqueue(work: () => void | Promise<void>) {
     queue = queue.then(() => closing ? undefined : work()).catch(error => reportDiscordError('Discord archive update', error));
@@ -108,7 +134,6 @@ export function connectBot({ config, archive, discord, requestStats }: {
       try {
         const result = await sync.catchUp();
         console.log(`History sync scanned ${result.scanned} messages. ${result.total} stories archived, ${result.uncategorized} uncategorized.`);
-        registerStats();
       } catch (error) {
         if (!closing) syncRetry = setTimeout(scheduleCatchUp, retryDelay);
         throw error;
@@ -124,16 +149,30 @@ export function connectBot({ config, archive, discord, requestStats }: {
 
   function registerStats() {
     if (closing || statsRegistered || statsRegistration) return;
+    clearTimeout(statsRetry);
     statsRegistration = client.channels.fetch(config.channelId).then(async channel => {
       if (!channel || !('guildId' in channel) || !channel.guildId) throw new Error('Could not find the news channel’s server');
       const application = client.application;
       if (!application) throw new Error('Discord application is unavailable');
-      statsGuildId = channel.guildId;
-      await application.commands.create({
-        name: 'stats', description: 'Show bot, archive, and HTTP request statistics',
-      }, statsGuildId);
+      const { guildId } = channel;
+      const { commands } = application;
+      statsGuildId = guildId;
+      await commands.create({
+        type: ApplicationCommandType.ChatInput,
+        name: 'stats', description: 'Show bot, archive, and HTTP request statistics', options: [],
+      }, guildId);
+      const [globalCommands, guildCommands] = await Promise.all([commands.fetch(), commands.fetch({ guildId })]);
+      for (const command of [...globalCommands.values(), ...guildCommands.values()]) {
+        if (command.type === ApplicationCommandType.ChatInput && (command.guildId !== guildId || command.name !== 'stats')) {
+          await command.delete();
+        }
+      }
       statsRegistered = true;
-    }).catch(error => reportDiscordError('/stats registration', error)).finally(() => {
+      console.log('Discord slash command setup complete. /stats is registered in the news server.');
+    }).catch(error => {
+      reportDiscordError('Discord slash command setup', error);
+      if (!closing) statsRetry = setTimeout(registerStats, retryDelay);
+    }).finally(() => {
       statsRegistration = undefined;
     });
   }
@@ -182,7 +221,7 @@ export function connectBot({ config, archive, discord, requestStats }: {
   client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand() || interaction.commandName !== 'stats' || interaction.guildId !== statsGuildId) return;
     try {
-      await interaction.reply({ content: statsMessage(client, archive, requestStats), flags: MessageFlags.Ephemeral });
+      await interaction.reply({ embeds: [statsEmbed(client, archive, requestStats)] });
     } catch (error) {
       reportDiscordError('/stats reply', error);
     }
@@ -200,6 +239,7 @@ export function connectBot({ config, archive, discord, requestStats }: {
     closing = true;
     clearTimeout(syncRetry);
     clearTimeout(loginRetry);
+    clearTimeout(statsRetry);
     await client.destroy();
     await Promise.all([queue, loginAttempt, statsRegistration]);
   };
