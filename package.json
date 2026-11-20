@@ -1,0 +1,20 @@
+{
+  "name": "face-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "sync": "node --env-file-if-exists=.env src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "discord.js": "^14.28.1",
+    "express": "^5.3.0",
+    "marked": "^18.2.1"
+  }
+}
