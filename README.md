@@ -1,13 +1,13 @@
-# Tech News API
+# Tech News API Powered by [Face's attic discord server](https://discord.gg/EDvZwmcJX5)
 
-The bot archives a followed Discord announcement channel and serves the saved stories through Express. The full archive is available as paginated JSON. RSS provides the latest 50 stories, and `/stats` in Discord shows bot uptime, gateway latency, archive counts, and HTTP traffic since process startup.
+This is a simple discord bot that exposes tech news posted in Face's attic discord server nerd stuff channel to a public api and also an rss feed.
 
 ## Set up
 
 1. Install Node.js 24 or later and pnpm, then run `pnpm install --frozen-lockfile`.
 2. Create a Discord bot in the Developer Portal and turn on **Message Content Intent**. Install it to the server with the `bot` and `applications.commands` scopes. Give it **View Channel** and **Read Message History** in the channel that receives the followed posts.
 3. Copy [.env.example](.env.example) to `.env`. Set `DISCORD_BOT_TOKEN` and `DISCORD_NEWS_CHANNEL_ID` to the bot token and the destination channel in your server. Set `DISCORD_SOURCE_CHANNEL_ID` to the upstream announcement channel ID. You can use `DISCORD_FOLLOWER_WEBHOOK_ID` for a known Channel Following webhook when a crosspost lacks its source reference.
-4. Set `PUBLIC_BASE_URL` to the origin used by clients. Set `PORT`, `HOST`, and `DATABASE_PATH` as needed. For a hosted service, put the SQLite file on persistent storage and serve HTTPS at the public origin.
+4. For a hosted service, set `PUBLIC_BASE_URL` to the public HTTPS origin clients use, such as `https://news.example.org`. Use the scheme and host with no path. The RSS feed uses this origin for its site and self links. For local development, leave it unset to use `http://localhost:<PORT>`. Set `PORT`, `HOST`, and `DATABASE_PATH` as needed, and put the SQLite file on persistent storage when hosting the service.
 5. Run `pnpm sync inspect` to check the title and category detected on recent posts, then run `pnpm start`. Browse the docs at `http://localhost:3000/` with the default settings. The bot registers `/stats` in the destination server.
 
 For local development, run `pnpm dev` with the same `.env` setup. The bot and API restart automatically when you edit the TypeScript source.
