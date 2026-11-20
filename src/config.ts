@@ -1,7 +1,9 @@
 import { resolve } from 'node:path';
 
-export function readConfig(env = process.env) {
-  function discordId(name, required = false) {
+export function readConfig(env: NodeJS.ProcessEnv = process.env) {
+  function discordId(name: string, required: true): string;
+  function discordId(name: string, required?: false): string | null;
+  function discordId(name: string, required = false): string | null {
     const value = env[name]?.trim();
     if ((!value && required) || (value && !/^\d{17,20}$/.test(value))) {
       throw new Error(`${name} must be a Discord ID`);
@@ -36,3 +38,6 @@ export function readConfig(env = process.env) {
     publicBaseUrl: publicUrl.origin,
   };
 }
+
+export type Config = ReturnType<typeof readConfig>;
+export type NewsSource = Pick<Config, 'channelId' | 'sourceChannelId' | 'followerWebhookId' | 'nerdsRoleId' | 'nerdsAiRoleId'>;

@@ -1,11 +1,12 @@
 import { once } from 'node:events';
-import { Events } from 'discord.js';
-import { createApp, createRequestStats } from './api.js';
-import { acquireWriter, openArchive } from './archive.js';
-import { readConfig } from './config.js';
-import { connectBot, createDiscord, reportDiscordError } from './discord.js';
-import { normalizePost } from './news.js';
-import { createSync } from './sync.js';
+import type { Server } from 'node:http';
+import { Events, type Client } from 'discord.js';
+import { createApp, createRequestStats } from './api.ts';
+import { acquireWriter, openArchive, type Archive } from './archive.ts';
+import { readConfig } from './config.ts';
+import { connectBot, createDiscord, reportDiscordError } from './discord.ts';
+import { normalizePost } from './news.ts';
+import { createSync } from './sync.ts';
 
 async function run() {
   const command = process.argv[2] ?? 'serve';
@@ -33,9 +34,9 @@ async function run() {
 
   const scope = JSON.stringify([config.channelId, config.sourceChannelId ?? config.followerWebhookId]);
   const releaseWriter = acquireWriter(config.databasePath);
-  let archive;
-  let server;
-  let stopBot;
+  let archive: Archive | undefined;
+  let server: Server | undefined;
+  let stopBot: ReturnType<typeof connectBot> | undefined;
   try {
     archive = openArchive(config.databasePath, scope);
     if (command !== 'serve') {
@@ -52,7 +53,7 @@ async function run() {
     await once(server, 'listening');
     console.log(`Tech News API listening on ${config.host}:${config.port}`);
     stopBot = connectBot({ config, archive, discord, requestStats });
-    await new Promise(resolve => {
+    await new Promise<void>(resolve => {
       const stop = () => {
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
@@ -65,7 +66,7 @@ async function run() {
     try {
       await Promise.all([
         stopBot ? stopBot() : discord.client.destroy(),
-        server?.listening ? new Promise(resolve => server.close(resolve)) : undefined,
+        server?.listening ? new Promise<void>(resolve => server?.close(() => resolve())) : undefined,
       ]);
     } finally {
       archive?.close();
@@ -74,7 +75,7 @@ async function run() {
   }
 }
 
-function waitForDiscord(client, token) {
+function waitForDiscord(client: Client, token: string) {
   return Promise.all([once(client, Events.ClientReady, { signal: AbortSignal.timeout(60_000) }), client.login(token)]);
 }
 

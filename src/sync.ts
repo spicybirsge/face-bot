@@ -1,14 +1,21 @@
 import { randomUUID } from 'node:crypto';
-import { isFollowedPost, normalizePost } from './news.js';
+import type { Archive, BackfillProgress } from './archive.ts';
+import type { NewsSource } from './config.ts';
+import { isFollowedPost, normalizePost, type NewsMessage } from './news.ts';
+
+export interface DiscordHistory {
+  verifyChannel(): Promise<void>;
+  fetchPage(limit: number, before: string | null): Promise<NewsMessage[]>;
+}
 
 const pageSize = 100;
 
-function isNewer(id, checkpoint) {
+function isNewer(id: string, checkpoint: string) {
   return BigInt(id) > BigInt(checkpoint);
 }
 
-export function createSync({ archive, discord, config }) {
-  function writeMessages(messages, scanId) {
+export function createSync({ archive, discord, config }: { archive: Archive; discord: DiscordHistory; config: NewsSource }) {
+  function writeMessages(messages: NewsMessage[], scanId?: string | null) {
     for (const message of messages) {
       if (isFollowedPost(message, config)) archive.writePost(message.id, normalizePost(message, config), scanId);
     }
@@ -21,12 +28,12 @@ export function createSync({ archive, discord, config }) {
 
     // Only initial backfills resume. A resync starts at the top so a message
     // deleted while a previous run was interrupted cannot be marked as present.
-    const progress = (!resync && saved) || { before: null, newest: '0', scanned: 0, complete: false };
+    const progress: BackfillProgress = (!resync && saved) || { before: null, newest: '0', scanned: 0, complete: false };
     const scanId = resync ? randomUUID() : null;
     while (!progress.complete) {
       const page = await discord.fetchPage(pageSize, progress.before);
       if (!progress.before && page.length) progress.newest = page[0].id;
-      if (page.length) progress.before = page.at(-1).id;
+      if (page.length) progress.before = page[page.length - 1].id;
       progress.scanned += page.length;
       progress.complete = page.length < pageSize;
 
@@ -37,7 +44,7 @@ export function createSync({ archive, discord, config }) {
         if (progress.complete) {
           archive.setState('checkpoint', progress.newest);
           archive.setState('lastSyncAt', new Date().toISOString());
-          if (resync) archive.prune(scanId);
+          if (scanId) archive.prune(scanId);
         }
       });
     }
@@ -50,7 +57,7 @@ export function createSync({ archive, discord, config }) {
 
     const checkpoint = archive.getState('checkpoint') ?? '0';
     let newest = checkpoint;
-    let before = null;
+    let before: string | null = null;
     let scanned = backfill?.scanned ?? 0;
     while (true) {
       const page = await discord.fetchPage(pageSize, before);
@@ -67,15 +74,15 @@ export function createSync({ archive, discord, config }) {
         }
       });
       if (complete) return { scanned, complete, ...archive.count() };
-      before = page.at(-1).id;
+      before = page[page.length - 1].id;
     }
   }
 
-  function record(message) {
+  function record(message: NewsMessage) {
     if (isFollowedPost(message, config)) archive.writePost(message.id, normalizePost(message, config));
   }
 
-  function remove(ids) {
+  function remove(ids: Iterable<string>) {
     archive.transaction(() => {
       for (const id of ids) archive.writePost(id, null);
     });

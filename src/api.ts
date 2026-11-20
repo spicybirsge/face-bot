@@ -1,22 +1,25 @@
 import { readFileSync } from 'node:fs';
-import express from 'express';
-import { categories } from './news.js';
+import express, { type ErrorRequestHandler } from 'express';
+import type { Archive, PostCursor } from './archive.ts';
+import { categories, type Category, type NewsPost } from './news.ts';
 
 const docs = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
 const pageSize = 50;
-const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
-const escapeXml = text => text
+const entities: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' };
+const escapeXml = (text: string) => text
   .replace(/[^\u0009\u000a\u000d\u0020-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu, '')
   .replace(/[&<>"']/g, character => entities[character]);
 
-function encodeCursor({ publishedAt, id }) {
+function encodeCursor({ publishedAt, id }: PostCursor) {
   return Buffer.from(JSON.stringify([publishedAt, id])).toString('base64url');
 }
 
-function decodeCursor(encoded) {
+function decodeCursor(encoded: unknown): PostCursor | null {
   if (typeof encoded !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(encoded)) return null;
   try {
-    const [publishedAt, id] = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    const decoded: unknown = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (!Array.isArray(decoded)) return null;
+    const [publishedAt, id] = decoded;
     if (typeof publishedAt !== 'string' || new Date(publishedAt).toISOString() !== publishedAt) return null;
     if (typeof id !== 'string' || !/^[a-f0-9]{32}$/.test(id)) return null;
     if (encodeCursor({ publishedAt, id }) === encoded) return { publishedAt, id };
@@ -26,7 +29,7 @@ function decodeCursor(encoded) {
   return null;
 }
 
-function rss(posts, baseUrl) {
+function rss(posts: NewsPost[], baseUrl: string) {
   const root = escapeXml(baseUrl);
   const lastChanged = posts.map(post => post.updatedAt ?? post.publishedAt).sort().at(-1);
   const items = posts.map(post => `    <item>
@@ -53,9 +56,10 @@ export function createRequestStats() {
   let notModified = 0;
   let totalMs = 0;
   return {
-    record(route, statusCode, elapsedMs) {
+    record(route: unknown, statusCode: number, elapsedMs: number) {
       requests += 1;
-      routes[Object.hasOwn(routes, route) ? route : 'other'] += 1;
+      const key = typeof route === 'string' && Object.hasOwn(routes, route) ? route as keyof typeof routes : 'other';
+      routes[key] += 1;
       if (statusCode >= 400) errors += 1;
       if (statusCode === 304) notModified += 1;
       totalMs += elapsedMs;
@@ -64,7 +68,17 @@ export function createRequestStats() {
   };
 }
 
-export function createApp({ archive, publicBaseUrl, requestStats }) {
+export type RequestStats = ReturnType<typeof createRequestStats>;
+
+function isCategory(value: unknown): value is Category {
+  return categories.some(category => category === value);
+}
+
+export function createApp({ archive, publicBaseUrl, requestStats }: {
+  archive: Pick<Archive, 'list'>;
+  publicBaseUrl: string;
+  requestStats: RequestStats;
+}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('etag', 'strong');
@@ -77,7 +91,7 @@ export function createApp({ archive, publicBaseUrl, requestStats }) {
 
   app.get('/', (_req, res) => res.type('html').send(docs));
 
-  const publicRead = (_req, res, next) => {
+  const publicRead: express.RequestHandler = (_req, res, next) => {
     res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'ETag' });
     next();
   };
@@ -92,7 +106,7 @@ export function createApp({ archive, publicBaseUrl, requestStats }) {
     if (typeof limit !== 'string' || !/^(?:[1-9]\d?|100)$/.test(limit)) {
       return res.status(400).json({ error: 'limit must be an integer from 1 to 100' });
     }
-    if (category !== undefined && !categories.includes(category)) {
+    if (category !== undefined && !isCategory(category)) {
       return res.status(400).json({ error: 'category must be nerds or nerds-ai' });
     }
     const decoded = cursor === undefined ? null : decodeCursor(cursor);
@@ -102,7 +116,7 @@ export function createApp({ archive, publicBaseUrl, requestStats }) {
     const items = archive.list({ limit: size + 1, category, cursor: decoded });
     const more = items.length > size;
     if (more) items.pop();
-    res.set('Cache-Control', 'public, no-cache').json({ items, nextCursor: more ? encodeCursor(items.at(-1)) : null });
+    res.set('Cache-Control', 'public, no-cache').json({ items, nextCursor: more ? encodeCursor(items[size - 1]) : null });
   });
 
   app.get('/feed.xml', publicRead, (_req, res) => {
@@ -111,10 +125,11 @@ export function createApp({ archive, publicBaseUrl, requestStats }) {
   });
 
   app.use((_req, res) => res.status(404).json({ error: 'Resource not found' }));
-  app.use((error, _req, res, next) => {
+  const handleError: ErrorRequestHandler = (error: unknown, _req, res, next) => {
     if (res.headersSent) return next(error);
-    console.error('HTTP request failed:', error.message);
+    console.error('HTTP request failed:', error instanceof Error ? error.message : 'Unknown error');
     res.status(500).json({ error: 'Internal server error' });
-  });
+  };
+  app.use(handleError);
   return app;
 }

@@ -2,7 +2,7 @@
 
 ## Project
 
-- This repository is for a discord.js bot and a read-only Express API that publish news from one configured Discord Channel Following destination. See [plan.md](plan.md) for the implementation order and acceptance checks.
+- This repository is for a discord.js bot and a read-only Express API that publish news from one configured Discord Channel Following destination. Write the service and its tests in TypeScript. See [plan.md](plan.md) for the implementation order and acceptance checks.
 - Restrict ingestion to the configured destination channel and followed source. Use one normalization path for historical and live messages. Keep unverified categories unset.
 - Keep Discord requests in the ingestion and sync paths. Serve JSON and RSS from the same persisted archive. Preserve stable article identifiers across retries and edits, and propagate source deletions to both outputs.
 - Keep bot tokens and local database files out of version control. Document required permissions, configuration, and verification commands as the implementation adds them.

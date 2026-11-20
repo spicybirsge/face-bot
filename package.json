@@ -8,13 +8,19 @@
     "pnpm": ">=10"
   },
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/index.js",
-    "sync": "node --env-file-if-exists=.env src/index.js",
+    "start": "node --env-file-if-exists=.env src/index.ts",
+    "sync": "node --env-file-if-exists=.env src/index.ts",
+    "typecheck": "tsc --noEmit",
     "test": "node --test"
   },
   "dependencies": {
     "discord.js": "^14.28.1",
     "express": "^5.3.0",
     "marked": "^18.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.19.2",
+    "typescript": "~5.9.3"
   }
 }
